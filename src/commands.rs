@@ -56,6 +56,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("tab.unsettle", &[opt("id")], "Bring a settled tab back to the lists."),
     cmd("tab.next", &[], "Show the next tab."),
     cmd("tab.prev", &[], "Show the previous tab."),
+    cmd("pane.view", &[opt("pane"), opt("mod"), opt("props")], "Show a mod in a terminal pane without changing its split or terminal. Omit mod to return to the terminal; its mod stays alive. Local to this window, reset on restart."),
     cmd("pane.zoom", &[opt("pane")], "Show only this pane of its tab, or all again."),
     cmd("pane.focus", &[opt("pane"), opt("terminal")], "Focus a pane (or the pane showing a terminal)."),
     cmd("pane.go", &[req("direction")], "Focus the pane or focusable mod to the \"left\", \"right\", \"up\" or \"down\"."),

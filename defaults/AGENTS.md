@@ -359,6 +359,24 @@ The tab block says how each pane of the shown tab is wrapped:
 - Each layout has its own, so one can stay bare while another makes
   every pane a card.
 
+### Terminal pane views (personal fork)
+
+`pane.view {pane?, mod, props?}` shows a mod in an existing terminal pane's
+body, preserving its ID, split, header, zoom and running terminal. Omit
+`mod` to restore its terminal. This is local to the window and resets on
+restart; it never changes the core layout or keep. The mod receives the
+pane's actual `{pane, terminal}` in props (overriding those supplied).
+`panes()[i].view` names the active mod, or is null in terminal view.
+`herdr-app status` includes active `pane_views` by pane ID.
+
+The mod copy stays alive in terminal view, preserving drafts and scroll.
+Changing the mod or its props recreates it. Closing the pane disposes it.
+Its timers still run when hidden. As with other mods, `nextCommand()` gets
+`focus` when switched to it; focus an input or handle in response. Hidden
+copies receive no key commands. A broken mod displays its load error; the
+pane header can always call `pane.view {pane}` to return to the terminal.
+The command targets terminal panes only, including remote panes.
+
 ### Floating blocks
 
 ```json

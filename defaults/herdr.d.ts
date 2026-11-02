@@ -55,6 +55,7 @@ export function playSound(sound: string): null;
  *   tab.close {id?}, tab.rename {id?, name}, tab.move {id, index}, tab.select {index | id},
  *   tab.next, tab.prev.
  * Panes: pane.split {direction: "right" | "down", pane?}, pane.close {pane?}, pane.zoom {pane?},
+ *   pane.view {pane?, mod?, props?} (local presentation; omit mod to return to terminal),
  *   pane.focus {pane | terminal}, pane.go {direction}, pane.swap {direction}. Pane menus get target { pane, terminal }.
  * Terminals: terminal.open {argv?, folder?, place?: "tab" | "right" | "down"}, terminal.kill {terminal},
  *   terminal.keep {terminal, place?} (a running one without a pane, e.g. a sub-agent, gets one),
@@ -185,6 +186,8 @@ export interface PaneInfo {
    *  pane, mod, tab, title, focused and zoomed are set. */
   terminal: string | null;
   mod?: string;
+  /** Active presentation mod of a terminal pane; null in terminal view. */
+  view?: string | null;
   tab: string;
   /** The terminal's title (what the program set), or the mod's name. */
   title: string;

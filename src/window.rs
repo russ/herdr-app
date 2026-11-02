@@ -9,6 +9,7 @@ mod floats;
 mod movable;
 mod pane_drag;
 mod pane_size;
+mod pane_view;
 mod titlebar;
 
 use crate::layout::{Axis, Background as Paint, Content, Fit, HeaderContent, Kind, Line, Node, PaneFrame, Size as Span};
@@ -358,6 +359,7 @@ pub struct AppWindow {
     /// Panes showing another terminal for now (pane → address), e.g. a sub-agent
     /// looked at in place of its parent. Not saved; the pane keeps its own.
     swapped: HashMap<String, String>,
+    pane_views: pane_view::PaneViews,
     float_drag: Option<floats::FloatDrag>,
     pane_drag: Option<pane_drag::PaneDrag>,
     pane_grip_hover: Option<String>,
@@ -466,6 +468,7 @@ impl AppWindow {
             agent: None,
             agent_focused: None,
             swapped: HashMap::new(),
+            pane_views: pane_view::PaneViews::default(),
             float_drag: None,
             pane_drag: None,
             pane_grip_hover: None,
@@ -1193,6 +1196,9 @@ impl AppWindow {
                     mods.push(pane_header_mod(n, name, props));
                 }
                 visit(n, &mut terms, &mut mods);
+                if let Some(inst) = self.pane_views.active(&n.id) {
+                    mods.push((n.id.clone(), inst.clone()));
+                }
                 if let Some(a) = self.swapped.get(&n.id) {
                     terms.push((format!("{}{SWAP}", n.id), a.clone()));
                 }
@@ -1258,6 +1264,9 @@ impl AppWindow {
                     out.insert(slot, i);
                 }
             }
+        }
+        for (pane, view) in &self.pane_views.0 {
+            out.insert(pane.clone(), view.inst.clone());
         }
         for o in &self.overlays {
             if let Some(c) = self.copies.get(&o.slot) {
@@ -1375,6 +1384,7 @@ impl AppWindow {
         self.model.order_spaces();
         let (model, live) = (&self.model, &self.live);
         self.swapped.retain(|p, a| model.address_of(p).is_some() && live.contains_key(a));
+        self.pane_views.retain(model);
         let (mut terms, mods_visible) = self.visible();
         // Every tab's terminals stay attached (only visible ones are drawn): tab
         // switches are instant and kitty images survive, which a repaint can't bring back.
@@ -1479,7 +1489,13 @@ impl AppWindow {
             // A mod pane takes the keyboard on a click; until then the window holds
             // it, so another tab's terminal can't keep it (and pull its tab back).
             if no_dialog {
-                focused.and_then(|p| self.pane_focus(&p)).unwrap_or_else(|| self.focus.clone()).focus(window, cx);
+                if let Some(p) = focused.as_ref().filter(|p| self.pane_views.active(p).is_some()) {
+                    self.focused_block = Some(p.clone());
+                    self.focus.focus(window, cx);
+                    self.hand_keyboard();
+                } else {
+                    focused.and_then(|p| self.pane_focus(&p)).unwrap_or_else(|| self.focus.clone()).focus(window, cx);
+                }
             }
         }
         if self.window_active {
@@ -1573,12 +1589,13 @@ impl AppWindow {
 
     /// Peeks, floats and swapped-in views own keyboard focus without changing the model pane.
     fn focused_terminal(&self, window: &Window) -> Option<&Term> {
-        self.terms.values().find(|t| t.focus.is_focused(window))
-            .or_else(|| self.focused_pane.as_deref().and_then(|p| self.pane_term(p)))
-            .or_else(|| self.model.focused_pane().and_then(|p| self.pane_term(&p)))
+        self.terms.iter().filter(|(p, _)| self.pane_views.active(p).is_none()).map(|(_, t)| t).find(|t| t.focus.is_focused(window))
+            .or_else(|| self.focused_pane.as_deref().filter(|p| self.pane_views.active(p).is_none()).and_then(|p| self.pane_term(p)))
+            .or_else(|| self.model.focused_pane().filter(|p| self.pane_views.active(p).is_none()).and_then(|p| self.pane_term(&p)))
     }
 
     fn pane_focus(&self, pane: &str) -> Option<FocusHandle> {
+        if self.pane_views.active(pane).is_some() { return None; }
         self.pane_term(pane).map(|t| t.focus.clone())
     }
 
@@ -1666,6 +1683,7 @@ impl AppWindow {
                     });
                     panes.push(json!({
                         "pane": p.id, "terminal": addr, "tab": ctx.id, "title": title.clone().unwrap_or_default(),
+                        "view": self.pane_views.active(&p.id).map(|i| &i.name),
                         "cwd": self.cwds.get(addr), "branch": m.folder_info.get(addr).and_then(|f| f.branch.clone()),
                         "status": m.status(addr), "app": a.and_then(|a| a.app.clone()), "program": self.program(addr),
                         "focused": focused, "zoomed": zoomed, "movable": self.pane_movable(&p.id),
@@ -2909,6 +2927,20 @@ impl AppWindow {
                 self.model.remove_pane(&pane);
                 self.kill(&addr.into_iter().collect::<Vec<_>>(), cx);
             }
+            "pane.view" => {
+                let Some(pane) = Self::owned(a, "pane").or_else(|| self.model.focused_pane()) else { return self.fail("no focused pane") };
+                if !a["mod"].is_null() && !a["mod"].is_string() { return self.fail("pane.view mod must be a string"); }
+                let name = Self::arg(a, "mod");
+                if let Some(name) = name && !self.folders.contains_key(name) {
+                    return self.fail(format!("no installed mod {name:?}"));
+                }
+                if let Err(error) = self.pane_views.select(&self.model, &pane, name, &a["props"]) { return self.fail(error); }
+                self.swapped.remove(&pane);
+                if self.model.focused_pane().as_deref() == Some(&pane) {
+                    self.focused_block = None;
+                    self.focused_pane = None;
+                }
+            }
             "pane.zoom" => {
                 let pane = Self::owned(a, "pane").or_else(|| self.model.focused_pane());
                 if let Some(pane) = pane
@@ -3033,9 +3065,11 @@ impl AppWindow {
                         // One with a pane of its own is shown there.
                         Some(t) if let Some(own) = self.model.pane_of(&t) => {
                             self.swapped.remove(&p);
+                            if let Some(view) = self.pane_views.0.get_mut(&own) { view.active = false; }
                             self.model.focus_pane(&own);
                         }
                         Some(t) => {
+                            if let Some(view) = self.pane_views.0.get_mut(&p) { view.active = false; }
                             self.swapped.insert(p.clone(), t);
                             self.model.focus_pane(&p);
                         }
@@ -3366,11 +3400,12 @@ impl AppWindow {
     fn mod_block_shown(&self, id: &str) -> bool {
         self.copies.contains_key(id)
             && (self.chrome.visible_blocks().iter().any(|n| n.id == id && matches!(n.content(), Some(Content::Mod { .. })))
-                || self.model.active_tab().is_some_and(|t| t.shown().visible_blocks().iter().any(|n| n.id == id)))
+                || self.model.active_tab().is_some_and(|t| t.shown().visible_blocks().iter().any(|n| n.id == id && (matches!(n.content(), Some(Content::Mod { .. })) || self.pane_views.active(id).is_some()))))
     }
 
     /// Its mod.json says `"focusable": true` (`go` asks only of visible blocks).
     fn focusable(&self, id: &str) -> bool {
+        if self.model.address_of(id).is_some() && self.pane_views.active(id).is_none() { return false; }
         self.copies.get(id).and_then(|c| self.folders.get(&c.inst.name)).is_some_and(|f| f.hint.focusable)
     }
 
@@ -3650,6 +3685,7 @@ impl AppWindow {
                 "layout": self.layout_name,
                 "agent": self.shown_agent(),
                 "floats": self.float_status(),
+                "pane_views": self.pane_views.0.iter().filter(|(_, v)| v.active).map(|(p, v)| (p.clone(), json!(v.inst.name))).collect::<serde_json::Map<String, Value>>(),
                 "overlays": self.overlays.iter().map(|o| match &o.layout {
                     Some(_) => Some("layout".to_owned()),
                     None => self.copies.get(&o.slot).map(|c| c.inst.name.clone()),
@@ -3960,6 +3996,7 @@ impl AppWindow {
 
     fn render_block(&self, n: &Node, content: &Content, focused: &HashSet<String>, cx: &mut Context<Self>) -> AnyElement {
         match content {
+            Content::Terminal { .. } if self.pane_views.active(&n.id).is_some() => self.render_slot(&n.id, cx),
             Content::Terminal { .. } => match self.pane_term(&n.id) {
                 Some(t) => {
                     let id = n.id.clone();
@@ -4027,7 +4064,11 @@ impl AppWindow {
                 .key_context(format!("Mod mod = {}", inst.name).as_str())
                 .when(in_pane, |d| {
                     let id = slot.to_owned();
-                    d.on_any_mouse_down(cx.listener(move |this, _, _, cx| {
+                    d.capture_any_mouse_down(cx.listener(move |this, _, window, cx| {
+                        if this.pane_views.active(&id).is_some() {
+                            this.focused_block = Some(id.clone());
+                            if this.terms.values().any(|t| t.focus.is_focused(window)) { this.focus.focus(window, cx); }
+                        }
                         if this.focused_pane.as_deref() != Some(id.as_str()) {
                             this.model.focus_pane(&id);
                             this.focused_pane = Some(id.clone());
@@ -4503,7 +4544,7 @@ fn terminal_block<'a>(chrome: &'a Node, focused: Option<&str>) -> Option<&'a Nod
 
 fn needs_model_pane(name: &str, args: &Value) -> bool {
     match name {
-        "pane.split" | "pane.close" | "pane.zoom" | "terminal.show" => AppWindow::arg(args, "pane").is_none(),
+        "pane.split" | "pane.close" | "pane.zoom" | "pane.view" | "terminal.show" => AppWindow::arg(args, "pane").is_none(),
         "pane.go" | "pane.swap" => true,
         "terminal.open" | "terminal.keep" => matches!(AppWindow::arg(args, "place"), Some("right" | "down")),
         _ => false,
@@ -4698,7 +4739,7 @@ impl Render for AppWindow {
         let clicked = self
             .terms
             .iter()
-            .find(|(_, t)| t.focus.is_focused(window))
+            .find(|(id, t)| self.pane_views.active(id).is_none() && t.focus.is_focused(window))
             .map(|(id, _)| id.clone());
         if clicked.is_some() && self.focused_block.take().is_some() {
             self.publish(cx);
@@ -5278,11 +5319,11 @@ export default class Probe extends View {
     #[test]
     fn composition_commands_never_default_to_a_source_pane() {
         use serde_json::json;
-        for name in ["pane.split", "pane.close", "pane.zoom", "pane.go", "pane.swap", "terminal.show"] {
+        for name in ["pane.split", "pane.close", "pane.zoom", "pane.view", "pane.go", "pane.swap", "terminal.show"] {
             assert!(super::needs_model_pane(name, &json!({})), "{name}");
             assert!(super::needs_model_pane(name, &json!({"pane": null})), "{name}");
         }
-        for name in ["pane.split", "pane.close", "pane.zoom", "terminal.show"] {
+        for name in ["pane.split", "pane.close", "pane.zoom", "pane.view", "terminal.show"] {
             assert!(!super::needs_model_pane(name, &json!({"pane": "explicit-pane"})), "{name}");
         }
         for name in ["terminal.open", "terminal.keep"] {
